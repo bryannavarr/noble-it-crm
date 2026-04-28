@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS tickets (
                   'DONE',
                   'CANCELLED',
                   'INVALID'
-                ) NOT NULL DEFAULT 'TODO',
+                ) NOT NULL DEFAULT 'IN_PROGRESS',
   created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   FOREIGN KEY (client_id) REFERENCES clients(id)
