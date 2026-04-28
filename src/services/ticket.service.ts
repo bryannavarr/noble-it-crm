@@ -109,7 +109,7 @@ export const listTickets = async (filters: {
    FROM tickets t
    JOIN clients c ON t.client_id = c.id
    WHERE ${conditions.join(" AND ")}
- ORDER BY t.id ASC`,
+ORDER BY CAST(SUBSTRING_INDEX(t.ticket_number, '-', -1) AS UNSIGNED) ASC`,
     params,
   );
   return rows;
