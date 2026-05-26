@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS client_rates (
                 'DEPLOYMENT_PROD',
                 'FEATURE',
                 'HARDWARE',
-                'MEETING'
+                'MEETING',
+                'BREAK_FIX'
               ) NOT NULL,
   rate        DECIMAL(10,2) NOT NULL,
   created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -58,7 +59,8 @@ CREATE TABLE IF NOT EXISTS tickets (
                   'DEPLOYMENT_STAGING',
                   'DEPLOYMENT_PROD',
                   'FEATURE',
-                  'HARDWARE'
+                  'HARDWARE',
+                  'BREAK_FIX'
                 ) NOT NULL,
   priority      ENUM('HIGH', 'MEDIUM', 'LOW') NOT NULL DEFAULT 'MEDIUM',
   status        ENUM(
