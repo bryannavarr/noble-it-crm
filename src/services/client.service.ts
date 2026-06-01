@@ -1,22 +1,22 @@
-import pool from '../db/pool';
+import pool from "../db/pool";
 
 interface CreateClientData {
-  name:           string;
-  contact_name?:  string;
-  email:          string;
-  phone?:         string;
+  name: string;
+  contact_name?: string;
+  email: string;
+  phone?: string;
   invoice_prefix: string;
-  default_rate:   number;
-  address?:       string;
+  default_rate: number;
+  address?: string;
 }
 
 interface UpdateClientData {
-  name?:          string;
-  contact_name?:  string;
-  email?:         string;
-  phone?:         string;
-  default_rate?:  number;
-  address?:       string;
+  name?: string;
+  contact_name?: string;
+  email?: string;
+  phone?: string;
+  default_rate?: number;
+  address?: string;
 }
 
 export const createClient = async (data: CreateClientData) => {
@@ -36,14 +36,14 @@ export const createClient = async (data: CreateClientData) => {
         data.invoice_prefix.toUpperCase(),
         data.default_rate,
         data.address ?? null,
-      ]
+      ],
     );
 
     const { insertId } = result;
 
     await conn.execute(
-      'INSERT INTO client_ticket_sequences (client_id, last_number) VALUES (?, 0)',
-      [insertId]
+      "INSERT INTO client_ticket_sequences (client_id, last_number) VALUES (?, 0)",
+      [insertId],
     );
 
     await conn.commit();
@@ -57,62 +57,70 @@ export const createClient = async (data: CreateClientData) => {
 };
 
 export const listClients = async () => {
-  const [rows] = await pool.execute('SELECT * FROM clients ORDER BY name ASC');
+  const [rows] = await pool.execute("SELECT * FROM clients ORDER BY name ASC");
   return rows;
 };
 
 export const getClientById = async (id: number) => {
-  const [rows]: any = await pool.execute(
-    'SELECT * FROM clients WHERE id = ?',
-    [id]
-  );
+  const [rows]: any = await pool.execute("SELECT * FROM clients WHERE id = ?", [id]);
   return rows[0] ?? null;
 };
 
 export const getClientByPrefix = async (prefix: string) => {
-  const [rows]: any = await pool.execute(
-    'SELECT * FROM clients WHERE invoice_prefix = ?',
-    [prefix.toUpperCase()]
-  );
+  const [rows]: any = await pool.execute("SELECT * FROM clients WHERE invoice_prefix = ?", [
+    prefix.toUpperCase(),
+  ]);
   return rows[0] ?? null;
 };
 
 export const updateClient = async (id: number, updates: UpdateClientData) => {
   const fields: string[] = [];
-  const params: any[]    = [];
+  const params: any[] = [];
 
-  if (updates.name         !== undefined) { fields.push('name = ?');         params.push(updates.name); }
-  if (updates.contact_name !== undefined) { fields.push('contact_name = ?'); params.push(updates.contact_name); }
-  if (updates.email        !== undefined) { fields.push('email = ?');        params.push(updates.email); }
-  if (updates.phone        !== undefined) { fields.push('phone = ?');        params.push(updates.phone); }
-  if (updates.default_rate !== undefined) { fields.push('default_rate = ?'); params.push(updates.default_rate); }
-  if (updates.address      !== undefined) { fields.push('address = ?');      params.push(updates.address); }
+  if (updates.name !== undefined) {
+    fields.push("name = ?");
+    params.push(updates.name);
+  }
+  if (updates.contact_name !== undefined) {
+    fields.push("contact_name = ?");
+    params.push(updates.contact_name);
+  }
+  if (updates.email !== undefined) {
+    fields.push("email = ?");
+    params.push(updates.email);
+  }
+  if (updates.phone !== undefined) {
+    fields.push("phone = ?");
+    params.push(updates.phone);
+  }
+  if (updates.default_rate !== undefined) {
+    fields.push("default_rate = ?");
+    params.push(updates.default_rate);
+  }
+  if (updates.address !== undefined) {
+    fields.push("address = ?");
+    params.push(updates.address);
+  }
 
-  if (!fields.length) throw new Error('No fields to update');
+  if (!fields.length) throw new Error("No fields to update");
 
-  await pool.execute(
-    `UPDATE clients SET ${fields.join(', ')} WHERE id = ?`,
-    [...params, id]
-  );
+  await pool.execute(`UPDATE clients SET ${fields.join(", ")} WHERE id = ?`, [...params, id]);
 
   return getClientById(id);
 };
 
-export const getRateForCategory = async (
-  clientId: number,
-  category: string
-): Promise<number> => {
+export const getRateForCategory = async (clientId: number, category: string): Promise<number> => {
   // Check for category-specific override first
   const [rows]: any = await pool.execute(
-    'SELECT rate FROM client_rates WHERE client_id = ? AND category = ?',
-    [clientId, category]
+    "SELECT rate FROM client_rates WHERE client_id = ? AND category = ?",
+    [clientId, category],
   );
 
   if (rows.length) return Number(rows[0].rate);
 
   // Fall back to client default rate
   const client: any = await getClientById(clientId);
-  if (!client) throw new Error('Client not found');
+  if (!client) throw new Error("Client not found");
   return Number(client.default_rate);
 };
 
@@ -123,19 +131,19 @@ export const getNextInvoiceNumber = async (clientId: number): Promise<string> =>
     await conn.beginTransaction();
 
     const [rows]: any = await conn.execute(
-      'SELECT invoice_prefix, last_invoice_number FROM clients WHERE id = ? FOR UPDATE',
-      [clientId]
+      "SELECT invoice_prefix, last_invoice_number FROM clients WHERE id = ? FOR UPDATE",
+      [clientId],
     );
 
-    if (!rows.length) throw new Error('Client not found');
+    if (!rows.length) throw new Error("Client not found");
 
     const { invoice_prefix, last_invoice_number } = rows[0];
     const nextNum = last_invoice_number + 1;
 
-    await conn.execute(
-      'UPDATE clients SET last_invoice_number = ? WHERE id = ?',
-      [nextNum, clientId]
-    );
+    await conn.execute("UPDATE clients SET last_invoice_number = ? WHERE id = ?", [
+      nextNum,
+      clientId,
+    ]);
 
     await conn.commit();
     return `${invoice_prefix}-${nextNum}`;
@@ -145,4 +153,14 @@ export const getNextInvoiceNumber = async (clientId: number): Promise<string> =>
   } finally {
     conn.release();
   }
+};
+
+export const peekNextInvoiceNumber = async (clientId: number): Promise<string> => {
+  const [rows]: any = await pool.execute(
+    "SELECT invoice_prefix, last_invoice_number FROM clients WHERE id = ?",
+    [clientId],
+  );
+  if (!rows.length) throw new Error("Client not found");
+  const { invoice_prefix, last_invoice_number } = rows[0];
+  return `${invoice_prefix}-${last_invoice_number + 1}`;
 };

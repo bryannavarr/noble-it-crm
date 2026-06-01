@@ -4,7 +4,7 @@ import fs from "fs";
 import path from "path";
 import pool from "../db/pool";
 import { CATEGORY_LABELS } from "../types";
-import { getClientById, getNextInvoiceNumber, getRateForCategory } from "./client.service";
+import { getClientById, getNextInvoiceNumber, getRateForCategory, peekNextInvoiceNumber } from "./client.service";
 import { getMeetingsForInvoice } from "./meeting.service";
 
 // ── Preview ───────────────────────────────────────────────────────────────────
@@ -23,7 +23,7 @@ export const previewInvoice = async (clientId: number, month: string) => {
     line_items: lineItems,
     total_hours: totalHours,
     total_amount: totalAmount,
-    invoice_number_preview: await getNextInvoiceNumber(clientId),
+    invoice_number_preview: await peekNextInvoiceNumber(clientId),
   };
 };
 
