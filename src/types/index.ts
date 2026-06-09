@@ -7,7 +7,8 @@ export type TicketCategory =
   | "DEPLOYMENT_PROD"
   | "FEATURE"
   | "HARDWARE"
-  | "BREAK_FIX";
+  | "BREAK_FIX"
+  | 'IT_SUPPORT'
 
 export type TicketPriority = "HIGH" | "MEDIUM" | "LOW";
 
@@ -141,7 +142,8 @@ export const CATEGORY_LABELS: Record<TicketCategory, string> = {
   DEPLOYMENT_PROD: "Deployment",
   FEATURE: "Feature",
   HARDWARE: "Hardware",
-  BREAK_FIX: "Break-Fix"
+  BREAK_FIX: "Break-Fix",
+  IT_SUPPORT: 'IT Support'
 };
 
 export interface CreateExpensePayload {
