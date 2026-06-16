@@ -4,8 +4,14 @@ import fs from "fs";
 import path from "path";
 import pool from "../db/pool";
 import { CATEGORY_LABELS } from "../types";
-import { getClientById, getNextInvoiceNumber, getRateForCategory, peekNextInvoiceNumber } from "./client.service";
+import {
+  getClientById,
+  getNextInvoiceNumber,
+  getRateForCategory,
+  peekNextInvoiceNumber,
+} from "./client.service";
 import { getMeetingsForInvoice } from "./meeting.service";
+import * as s3 from "./s3.service";
 
 // ── Preview ───────────────────────────────────────────────────────────────────
 
@@ -160,28 +166,43 @@ export const getInvoiceById = async (id: number) => {
   return { ...rows[0], line_items: lineItems };
 };
 
-export const approveInvoice = async (id: number) => {
-  await pool.execute(`UPDATE invoices SET status = 'APPROVED' WHERE id = ?`, [id]);
-  return getInvoiceById(id);
-};
-
-export const sendInvoice = async (id: number) => {
+// Saves the invoice PDF to S3, marks status=APPROVED + is_in_cloud=1, updates
+// pdf_path to the S3 key, and removes the local file. Idempotent: a second
+// call on an already-saved invoice is a no-op that returns the row as-is.
+//
+// When S3 isn't configured (typical for local dev) the upload/delete are
+// skipped and only the status flips to APPROVED — useful for testing the
+// email click flow without real cloud storage.
+export const saveInvoiceToS3 = async (id: number) => {
   const invoice: any = await getInvoiceById(id);
   if (!invoice) throw new Error("Invoice not found");
-  if (invoice.status !== "APPROVED") throw new Error("Invoice must be approved before sending");
+
+  // Already saved? No-op.
+  if (invoice.is_in_cloud) return invoice;
+
   if (!invoice.pdf_path) throw new Error("No PDF found for this invoice");
 
-  const transporter = buildTransporter();
+  const localPath = invoice.pdf_path;
+  const s3Key = `invoices/${invoice.invoice_number}.pdf`;
 
-  await transporter.sendMail({
-    from: `"Noble IT" <${process.env.SMTP_USER}>`,
-    to: invoice.client_email,
-    subject: `Invoice ${invoice.invoice_number} from Noble IT`,
-    html: buildClientEmailHtml(invoice),
-    attachments: [{ filename: `${invoice.invoice_number}.pdf`, path: invoice.pdf_path }],
-  });
+  if (s3.isEnabled()) {
+    await s3.uploadFile(localPath, s3Key, "application/pdf");
+    // Best-effort local cleanup — log but don't fail the save if the unlink errors.
+    try {
+      if (fs.existsSync(localPath)) fs.unlinkSync(localPath);
+    } catch (err: any) {
+      console.warn(`[saveInvoiceToS3] could not remove local file ${localPath}: ${err.message}`);
+    }
+    await pool.execute(
+      `UPDATE invoices SET status = 'APPROVED', is_in_cloud = 1, pdf_path = ? WHERE id = ?`,
+      [s3Key, id],
+    );
+  } else {
+    // S3 disabled (local dev). Approve without moving the file.
+    await pool.execute(`UPDATE invoices SET status = 'APPROVED' WHERE id = ?`, [id]);
+  }
 
-  await pool.execute(`UPDATE invoices SET status = 'SENT', sent_at = NOW() WHERE id = ?`, [id]);
+  return getInvoiceById(id);
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -190,7 +211,7 @@ const buildLineItems = async (clientId: number, month: string) => {
   const items: any[] = [];
 
   const [tickets]: any = await pool.execute(
-    `SELECT t.id, t.ticket_number, t.category, t.subject,
+    `SELECT t.id, t.ticket_number, t.category, t.subject, t.description,
             SUM(wl.qty) AS total_qty
      FROM tickets t
      JOIN work_logs wl ON wl.ticket_id = t.id
@@ -207,7 +228,9 @@ const buildLineItems = async (clientId: number, month: string) => {
   for (const ticket of tickets) {
     const label =
       CATEGORY_LABELS[ticket.category as keyof typeof CATEGORY_LABELS] ?? ticket.category;
-    const subject = `${ticket.ticket_number}: ${ticket.subject}`;
+    const subject = ticket.description
+      ? `${ticket.ticket_number}: ${ticket.subject}\n${ticket.description}`
+      : `${ticket.ticket_number}: ${ticket.subject}`;
 
     if (ticket.category === "HARDWARE") {
       // Hardware: sum qty × unit_price × markup per work log entry
@@ -338,24 +361,24 @@ const generatePDF = (
       .text(`$${meta.totalAmount.toFixed(2)}`, lightStartX, 48, { width: lightW, align: "center" });
 
     // ── Noble IT info ────────────────────────────────────────────────────────
-    doc
-      .fillColor(BLACK)
-      .fontSize(9)
-      .font("Helvetica")
-      .text(process.env.NOBLE_IT_NAME ?? "Noble IT", margin, 115)
-      .text(process.env.NOBLE_IT_ADDRESS ?? "", margin, 128)
-      .text(process.env.NOBLE_IT_PHONE ?? "", margin, 141)
-      .text(process.env.NOBLE_IT_EMAIL ?? "", margin, 154);
+    // doc
+    //   .fillColor(BLACK)
+    //   .fontSize(9)
+    //   .font("Helvetica")
+    //   .text(process.env.NOBLE_IT_NAME ?? "Noble IT", margin, 115)
+    //   .text(process.env.NOBLE_IT_ADDRESS ?? "", margin, 128)
+    //   .text(process.env.NOBLE_IT_PHONE ?? "", margin, 141)
+    //   .text(process.env.NOBLE_IT_EMAIL ?? "", margin, 154);
 
     // ── Bill To ──────────────────────────────────────────────────────────────
-    doc.fillColor(GRAY).fontSize(8).text("BILL TO", margin, 190);
-    doc.fillColor(BLACK).fontSize(10).font("Helvetica-Bold").text(client.name, margin, 203);
+    doc.fillColor(GRAY).fontSize(8).text("BILL TO", margin, 120);
+    doc.fillColor(BLACK).fontSize(10).font("Helvetica-Bold").text(client.name, margin, 133);
     doc
       .font("Helvetica")
       .fontSize(9)
-      .text(client.contact_name ?? "", margin, 216)
-      .text(client.phone ?? "", margin, 229)
-      .text(client.email ?? "", margin, 242);
+      .text(client.contact_name ?? "", margin, 146)
+      .text(client.phone ?? "", margin, 159)
+      .text(client.email ?? "", margin, 172);
 
     // ── Invoice metadata (right column) ──────────────────────────────────────
     const metaX = pageW * 0.55;
@@ -367,17 +390,17 @@ const generatePDF = (
       .fillColor(GRAY)
       .fontSize(9)
       .font("Helvetica")
-      .text("Invoice Number:", metaX, 190)
-      .text("Invoice Date:", metaX, 205)
-      .text("Payment Due:", metaX, 220)
-      .text("Amount Due (USD):", metaX, 235);
+      .text("Invoice Number:", metaX, 120)
+      .text("Invoice Date:", metaX, 135)
+      .text("Payment Due:", metaX, 150)
+      .text("Amount Due (USD):", metaX, 165);
 
     doc
       .fillColor(BLACK)
-      .text(meta.invoiceNumber, valX, 190)
-      .text(formatDate(meta.invoiceDate), valX, 205)
-      .text(formatDate(meta.dueDate), valX, 220)
-      .text(`$${meta.totalAmount.toFixed(2)}`, valX, 235);
+      .text(meta.invoiceNumber, valX, 120)
+      .text(formatDate(meta.invoiceDate), valX, 135)
+      .text(formatDate(meta.dueDate), valX, 150)
+      .text(`$${meta.totalAmount.toFixed(2)}`, valX, 165);
 
     // ── Column layout constants ─────────────────────────────────────────────────
     const colAmountW = 65;
@@ -385,16 +408,20 @@ const generatePDF = (
     const colHoursW = 50;
     const colHoursX = colAmountX - colHoursW - 10;
     const colLabelX = margin + 5;
-    const colServW = colHoursX - colLabelX - 10;
+    const colLabelW = 110; // category column width
+    const colDescX = colLabelX + colLabelW + 5; // description column start
+    const colServW = colHoursX - colDescX - 10;
 
     // ── Line items table ──────────────────────────────────────────────────────
-    const tableY = 280;
+    const tableY = 200;
     doc.rect(margin, tableY, contentW, 18).fill("#f0f2f8");
+    doc.fillColor(GRAY).fontSize(8);
     doc
       .fillColor(GRAY)
       .fontSize(8)
       .font("Helvetica")
-      .text("SERVICES", colLabelX, tableY + 5)
+      .text("CATEGORY", colLabelX, tableY + 5)
+      .text("DESCRIPTION", colDescX, tableY + 5)
       .text("QTY / HRS", colHoursX, tableY + 5, { width: colHoursW, align: "right" })
       .text("AMOUNT", colAmountX, tableY + 5, { width: colAmountW, align: "right" });
 
@@ -413,19 +440,25 @@ const generatePDF = (
         y = 50;
       }
 
-      doc.fillColor(BLACK).fontSize(9).font("Helvetica-Bold").text(item.category, colLabelX, y);
-      y += 13;
+      const rowTop = y;
 
-      summaryLines.forEach((line: string) => {
+      // Category column
+      doc
+        .fillColor(BLACK)
+        .fontSize(9)
+        .font("Helvetica-Bold")
+        .text(item.category, colLabelX, rowTop, { width: colLabelW });
+
+      // Description column — ticket number + subject
+      summaryLines.forEach((line: string, idx: number) => {
         doc
           .fillColor(BLACK)
           .fontSize(8)
           .font("Helvetica")
-          .text(line, colLabelX, y, { width: colServW });
-        y += 12;
+          .text(line, colDescX, rowTop + idx * 12, { width: colServW });
       });
 
-      const rowTop = y - (12 * summaryLines.length + 13);
+      y += Math.max(13, summaryLines.length * 12) + 6;
       doc
         .fillColor(BLACK)
         .fontSize(9)
@@ -487,10 +520,11 @@ const generatePDF = (
         align: "right",
       });
 
-    // ── Footer — logo only, no address text to avoid page overflow ────────
-    const footerY = pageH - 80;
+    // ── Footer — three column layout ─────────────────────────────────────
+    const footerY = pageH - 90;
     const logoPath = process.env.NOBLE_IT_LOGO;
     const logoExists = logoPath && fs.existsSync(logoPath);
+    const colW = contentW / 3;
 
     doc
       .moveTo(margin, footerY)
@@ -499,6 +533,7 @@ const generatePDF = (
       .lineWidth(0.5)
       .stroke();
 
+    // Left col — logo
     if (logoExists) {
       doc.image(logoPath!, margin, footerY + 10, { height: 22, fit: [82, 22] });
     } else {
@@ -506,22 +541,38 @@ const generatePDF = (
         .fillColor(BLACK)
         .fontSize(10)
         .font("Helvetica-Bold")
-        .text(process.env.NOBLE_IT_NAME ?? "Noble IT", margin, footerY + 18);
+        .text(process.env.NOBLE_IT_NAME ?? "Noble IT", margin, footerY + 16);
     }
 
-    // Billing contact — right justified, does not overlap logo on the left
-    const billingEmail = process.env.NOBLE_IT_BILLING_EMAIL ?? process.env.NOBLE_IT_EMAIL ?? "";
-    if (billingEmail) {
-      doc
-        .fillColor(GRAY)
-        .fontSize(8)
-        .font("Helvetica")
-        .text(`For billing inquiries, please contact ${billingEmail}`, margin, footerY + 20, {
-          width: contentW,
-          align: "right",
-        });
-    }
+    // Middle col — mailing address
+    // Middle col — mailing address
+    const midX = margin + colW + 20;
+    doc
+      .fillColor(GRAY)
+      .fontSize(8)
+      .font("Helvetica")
+      .text("3654 Thornton Avenue #1065", midX, footerY + 10, { width: colW, align: "center" })
+      .text("Fremont, CA 94536", midX, footerY + 21, { width: colW, align: "center" });
 
+    // Right col — phone and billing email
+    // Right col — phone and billing email
+    const rightX = margin + colW * 2;
+    doc
+      .fillColor(GRAY)
+      .fontSize(8)
+      .font("Helvetica")
+      .text(process.env.NOBLE_IT_PHONE ?? "510-214-3657", rightX, footerY + 10, {
+        width: colW,
+        align: "right",
+      });
+    doc
+      .fillColor(GRAY)
+      .fontSize(8)
+      .font("Helvetica")
+      .text(process.env.NOBLE_IT_BILLING_EMAIL ?? "billing@nobleit.co", rightX, footerY + 22, {
+        width: colW,
+        align: "right",
+      });
     doc.end();
     stream.on("finish", () => resolve(filepath));
     stream.on("error", reject);
@@ -596,14 +647,15 @@ const sendApprovalEmail = async (
           </tfoot>
         </table>
         <div style="margin-top:24px;text-align:center;">
-          <a href="${apiBase}/api/invoices/${invoiceId}/approve"
+          <a href="${apiBase}/api/invoices/${invoiceId}/save"
              style="background:#4a5fa5;color:white;padding:12px 32px;border-radius:6px;
                     text-decoration:none;font-weight:bold;display:inline-block;">
-            ✓ Approve &amp; Send to Client
+            💾 Save Invoice
           </a>
         </div>
         <p style="text-align:center;color:#888;font-size:12px;margin-top:12px;">
-          PDF invoice is attached for your review.
+          Clicking Save uploads this invoice to S3 and archives the local copy.
+          The PDF is attached for your review.
         </p>
       </div>
     </div>
@@ -618,21 +670,3 @@ const sendApprovalEmail = async (
   });
 };
 
-const buildClientEmailHtml = (invoice: any): string => `
-  <div style="font-family:sans-serif;max-width:600px;margin:0 auto;">
-    <div style="background:#4a5fa5;color:white;padding:24px;border-radius:8px 8px 0 0;">
-      <h2 style="margin:0;">Invoice from Noble IT</h2>
-      <p style="margin:4px 0 0;opacity:0.8;">${invoice.invoice_number}</p>
-    </div>
-    <div style="padding:24px;border:1px solid #eee;">
-      <p>Hi ${invoice.contact_name ?? invoice.client_name},</p>
-      <p>Please find your invoice attached. A total of
-         <strong>$${Number(invoice.total_amount).toFixed(2)}</strong>
-         is due by <strong>${new Date(invoice.due_date).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}</strong>.
-      </p>
-      <p style="color:#888;font-size:13px;">
-        Questions? Reply to this email or call ${process.env.NOBLE_IT_PHONE ?? ""}.
-      </p>
-    </div>
-  </div>
-`;

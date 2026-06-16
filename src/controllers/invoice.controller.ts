@@ -58,22 +58,12 @@ export const getInvoice = async (req: Request, res: Response): Promise<void> => 
   }
 };
 
-export const approveInvoice = async (req: Request, res: Response): Promise<void> => {
+export const saveInvoiceToS3 = async (req: Request, res: Response): Promise<void> => {
   try {
-    const invoice = await invoiceService.approveInvoice(Number(req.params.id));
-    res.json({ success: true, data: invoice, message: 'Invoice approved' });
+    const invoice = await invoiceService.saveInvoiceToS3(Number(req.params.id));
+    res.json({ success: true, data: invoice, message: 'Invoice saved to S3' });
   } catch (err: any) {
-    console.error('[approveInvoice]', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-};
-
-export const sendInvoice = async (req: Request, res: Response): Promise<void> => {
-  try {
-    await invoiceService.sendInvoice(Number(req.params.id));
-    res.json({ success: true, message: 'Invoice sent to client' });
-  } catch (err: any) {
-    console.error('[sendInvoice]', err);
+    console.error('[saveInvoiceToS3]', err);
     res.status(500).json({ success: false, error: err.message });
   }
 };

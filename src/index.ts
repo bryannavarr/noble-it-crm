@@ -3,7 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import authenticate from './middleware/auth';
-import { approveInvoice, sendInvoice } from './services/invoice.service';
+import { saveInvoiceToS3 } from './services/invoice.service';
 
 import ticketRoutes  from './routes/ticket.routes';
 import clientRoutes  from './routes/client.routes';
@@ -23,16 +23,19 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'noble-msp', ts: new Date().toISOString() });
 });
 
-// ── Invoice approval via email link (public, one-click) ───────────────────────
-app.get('/api/invoices/:id/approve', async (req, res) => {
+// ── Save invoice to S3 via email link (public, one-click, idempotent) ────────
+// The approval email's "Save Invoice" button hits this; uploads the PDF to
+// S3, flips status -> APPROVED and is_in_cloud -> 1, and deletes the local
+// copy. Clicking again on an already-saved invoice is a no-op.
+app.get('/api/invoices/:id/save', async (req, res) => {
   try {
-    await approveInvoice(Number(req.params.id));
-    await sendInvoice(Number(req.params.id));
+    const invoice: any = await saveInvoiceToS3(Number(req.params.id));
     res.send(`
       <html>
         <body style="font-family:sans-serif;text-align:center;padding:60px;">
-          <h2 style="color:#4a5fa5;">✓ Invoice Approved</h2>
-          <p>The invoice has been approved and sent to the client.</p>
+          <h2 style="color:#4a5fa5;">✓ Invoice Saved</h2>
+          <p>${invoice?.invoice_number ?? 'Invoice'} has been uploaded to S3.</p>
+          <p style="color:#888;font-size:13px;">You can close this tab.</p>
         </body>
       </html>
     `);

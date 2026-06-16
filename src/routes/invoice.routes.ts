@@ -7,7 +7,6 @@ router.get('/preview',       invoiceController.previewInvoice);
 router.post('/generate',     invoiceController.generateInvoice);
 router.get('/',              invoiceController.listInvoices);
 router.get('/:id',           invoiceController.getInvoice);
-router.post('/:id/approve',  invoiceController.approveInvoice);
-router.post('/:id/send',     invoiceController.sendInvoice);
+router.post('/:id/save',     invoiceController.saveInvoiceToS3);
 
 export default router;
