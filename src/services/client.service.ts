@@ -164,3 +164,20 @@ export const peekNextInvoiceNumber = async (clientId: number): Promise<string> =
   const { invoice_prefix, last_invoice_number } = rows[0];
   return `${invoice_prefix}-${last_invoice_number + 1}`;
 };
+
+// Resets the per-client ticket number counter so the next ticket starts at 1.
+// Used by `msp clean <client>` after a bulk delete so ticket numbers don't have
+// gaps. Doesn't touch any existing tickets.
+export const resetTicketSequence = async (clientId: number) => {
+  const [rows]: any = await pool.execute(
+    "SELECT id, invoice_prefix FROM clients WHERE id = ?",
+    [clientId],
+  );
+  if (!rows.length) throw new Error("Client not found");
+
+  await pool.execute(
+    "UPDATE client_ticket_sequences SET last_number = 0 WHERE client_id = ?",
+    [clientId],
+  );
+  return { client_id: clientId, invoice_prefix: rows[0].invoice_prefix, last_number: 0 };
+};

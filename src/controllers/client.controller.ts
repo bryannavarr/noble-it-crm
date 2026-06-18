@@ -44,3 +44,13 @@ export const updateClient = async (req: Request, res: Response): Promise<void> =
     res.status(500).json({ success: false, error: err.message });
   }
 };
+
+export const resetTicketSequence = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const result = await clientService.resetTicketSequence(Number(req.params.id));
+    res.json({ success: true, data: result, message: 'Ticket sequence reset' });
+  } catch (err: any) {
+    console.error('[resetTicketSequence]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
