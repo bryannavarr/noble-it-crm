@@ -67,3 +67,26 @@ export const saveInvoiceToS3 = async (req: Request, res: Response): Promise<void
     res.status(500).json({ success: false, error: err.message });
   }
 };
+
+export const addAdjustment = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { amount, label } = req.body;
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount === 0) {
+      res.status(400).json({ success: false, error: 'amount must be a non-zero number' });
+      return;
+    }
+    if (!label || typeof label !== 'string' || !label.trim()) {
+      res.status(400).json({ success: false, error: 'label is required' });
+      return;
+    }
+    const invoice = await invoiceService.addAdjustment(
+      Number(req.params.id),
+      amount,
+      label,
+    );
+    res.json({ success: true, data: invoice, message: 'Adjustment added' });
+  } catch (err: any) {
+    console.error('[addAdjustment]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};

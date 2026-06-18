@@ -166,6 +166,71 @@ export const getInvoiceById = async (id: number) => {
   return { ...rows[0], line_items: lineItems };
 };
 
+// Appends an ADJUSTMENT line item (positive surcharge or negative discount)
+// to an existing invoice, recomputes total_amount from all line items, and
+// regenerates the PDF. If the invoice already lives in S3, re-uploads it.
+export const addAdjustment = async (invoiceId: number, amount: number, label: string) => {
+  const invoice: any = await getInvoiceById(invoiceId);
+  if (!invoice) throw new Error("Invoice not found");
+  if (!Number.isFinite(amount) || amount === 0) {
+    throw new Error("Adjustment amount must be a non-zero number");
+  }
+  const trimmedLabel = String(label || "").trim();
+  if (!trimmedLabel) throw new Error("Adjustment label is required");
+
+  const signedAmount = Number(amount.toFixed(2));
+
+  await pool.execute(
+    `INSERT INTO invoice_line_items
+       (invoice_id, type, reference_id, category, subject, hours, rate, amount)
+     VALUES (?, 'ADJUSTMENT', 0, 'Adjustment', ?, 1, ?, ?)`,
+    [invoiceId, trimmedLabel, signedAmount, signedAmount],
+  );
+
+  const [[totals]]: any = await pool.execute(
+    `SELECT COALESCE(SUM(amount), 0) AS total_amount
+     FROM invoice_line_items
+     WHERE invoice_id = ?`,
+    [invoiceId],
+  );
+
+  await pool.execute(`UPDATE invoices SET total_amount = ? WHERE id = ?`, [
+    Number(totals.total_amount),
+    invoiceId,
+  ]);
+
+  // Pull a fresh view (with the new line item) and regenerate the PDF.
+  const fresh: any = await getInvoiceById(invoiceId);
+  const client: any = await getClientById(fresh.client_id);
+  const meta = {
+    invoiceNumber: fresh.invoice_number,
+    invoiceDate: new Date(fresh.invoice_date),
+    dueDate: new Date(fresh.due_date),
+    totalHours: Number(fresh.total_hours),
+    totalAmount: Number(fresh.total_amount),
+  };
+  const newPdfPath = await generatePDF(invoiceId, client, fresh.line_items, meta);
+
+  // If the invoice was already archived to S3, re-upload the new PDF under
+  // the same S3 key so links keep working. pdf_path holds the S3 key in that
+  // case, so we need to upload from the regenerated local file and then
+  // remove the local copy again.
+  if (fresh.is_in_cloud) {
+    const s3Key = fresh.pdf_path;
+    await s3.uploadFile(newPdfPath, s3Key, "application/pdf");
+    try {
+      if (fs.existsSync(newPdfPath)) fs.unlinkSync(newPdfPath);
+    } catch (err: any) {
+      console.warn(`[addAdjustment] could not remove local file ${newPdfPath}: ${err.message}`);
+    }
+  } else {
+    // Otherwise update pdf_path to the freshly regenerated local file.
+    await pool.execute(`UPDATE invoices SET pdf_path = ? WHERE id = ?`, [newPdfPath, invoiceId]);
+  }
+
+  return getInvoiceById(invoiceId);
+};
+
 // Saves the invoice PDF to S3, marks status=APPROVED + is_in_cloud=1, updates
 // pdf_path to the S3 key, and removes the local file. Idempotent: a second
 // call on an already-saved invoice is a no-op that returns the row as-is.
@@ -259,6 +324,33 @@ const buildLineItems = async (clientId: number, month: string) => {
         amount: Number(totalAmount.toFixed(2)),
         is_hardware: true,
       });
+    } else if (ticket.category === "MEDIA_DIGITIZATION") {
+      // One line per work log so each (qty × unit_price × media type) row is
+      // visible on the invoice. No markup.
+      const [logs]: any = await pool.execute(
+        `SELECT id, qty, unit_price, description FROM work_logs
+         WHERE ticket_id = ?
+         AND DATE_FORMAT(worked_date, '%Y-%m') = ?
+         ORDER BY id ASC`,
+        [ticket.id, month],
+      );
+
+      for (const log of logs) {
+        const qty = Number(log.qty);
+        const unit = Number(log.unit_price);
+        const detail = log.description?.trim() ? ` — ${log.description.trim()}` : "";
+        items.push({
+          type: "TICKET",
+          reference_id: ticket.id,
+          category: label,
+          subject: `${ticket.ticket_number}: ${ticket.subject}${detail}`,
+          qty,
+          unit_price: unit,
+          rate: unit,
+          amount: Number((qty * unit).toFixed(2)),
+          is_hardware: true, // share HARDWARE's "qty × unit" display path in the PDF
+        });
+      }
     } else {
       const rate = await getRateForCategory(clientId, ticket.category);
       const qty = Number(ticket.total_qty);
@@ -669,4 +761,3 @@ const sendApprovalEmail = async (
     attachments: [{ filename: `${meta.invoiceNumber}.pdf`, path: meta.pdfPath }],
   });
 };
-
