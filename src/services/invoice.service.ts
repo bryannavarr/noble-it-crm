@@ -242,10 +242,6 @@ export const deleteInvoice = async (id: number) => {
   const localPdfPath = invoice.is_in_cloud ? null : invoice.pdf_path;
   const s3Key = invoice.is_in_cloud ? invoice.pdf_path : null;
 
-  // Parse the numeric suffix from "PREFIX-N" so we can compare with the
-  // client's last_invoice_number counter.
-  const suffix = Number(String(invoice.invoice_number).split("-").pop());
-
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
@@ -253,18 +249,25 @@ export const deleteInvoice = async (id: number) => {
     await conn.execute(`UPDATE adjustments SET invoice_id = NULL WHERE invoice_id = ?`, [id]);
     await conn.execute(`UPDATE meetings    SET invoice_id = NULL WHERE invoice_id = ?`, [id]);
     await conn.execute(`DELETE FROM invoice_line_items WHERE invoice_id = ?`, [id]);
-
-    // Roll back the per-client counter only if this is still the latest.
-    if (Number.isFinite(suffix)) {
-      await conn.execute(
-        `UPDATE clients
-         SET last_invoice_number = last_invoice_number - 1
-         WHERE id = ? AND last_invoice_number = ?`,
-        [invoice.client_id, suffix],
-      );
-    }
-
     await conn.execute(`DELETE FROM invoices WHERE id = ?`, [id]);
+
+    // Recompute the per-client invoice counter from whatever invoices are
+    // left. Sets it to the highest remaining suffix, or 0 if none remain.
+    // Robust to out-of-order deletes (deleting VIVIAN-1 before VIVIAN-2) and
+    // to clearing every invoice for a client.
+    const [[maxRow]]: any = await conn.execute(
+      `SELECT COALESCE(
+         MAX(CAST(SUBSTRING_INDEX(invoice_number, '-', -1) AS UNSIGNED)),
+         0
+       ) AS max_num
+       FROM invoices
+       WHERE client_id = ?`,
+      [invoice.client_id],
+    );
+    await conn.execute(
+      `UPDATE clients SET last_invoice_number = ? WHERE id = ?`,
+      [Number(maxRow.max_num), invoice.client_id],
+    );
 
     await conn.commit();
   } catch (err) {
