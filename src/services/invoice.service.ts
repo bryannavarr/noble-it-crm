@@ -22,7 +22,7 @@ const adjustmentToLineItem = (adj: { id: number; amount: number; label: string }
   reference_id: adj.id,
   category: "Adjustment",
   subject: adj.label,
-  qty: 1,
+  qty: 0, // hours column is left blank for ADJUSTMENT rows on the PDF
   unit_price: null,
   rate: Number(adj.amount),
   amount: Number(adj.amount),
@@ -242,7 +242,7 @@ export const addAdjustment = async (invoiceId: number, amount: number, label: st
   await pool.execute(
     `INSERT INTO invoice_line_items
        (invoice_id, type, reference_id, category, subject, hours, rate, amount)
-     VALUES (?, 'ADJUSTMENT', ?, 'Adjustment', ?, 1, ?, ?)`,
+     VALUES (?, 'ADJUSTMENT', ?, 'Adjustment', ?, 0, ?, ?)`,
     [invoiceId, adj.id, adj.label, adj.amount, adj.amount],
   );
 
@@ -617,8 +617,14 @@ const generatePDF = (
           width: colAmountW,
           align: "right",
         });
-      // Hardware shows plain qty, services show qty with 'h' suffix
-      const qtyLabel = item.is_hardware ? String(item.qty) : `${item.qty}h`;
+      // Hardware shows plain qty, services show qty with 'h' suffix, and
+      // adjustments leave the hours/qty cell blank (it's a flat dollar value).
+      const qtyLabel =
+        item.type === "ADJUSTMENT"
+          ? ""
+          : item.is_hardware
+            ? String(item.qty)
+            : `${item.qty}h`;
       doc.text(qtyLabel, colHoursX, rowTop, { width: colHoursW, align: "right" });
 
       doc
@@ -765,7 +771,9 @@ const sendApprovalEmail = async (
         <strong>${item.category}</strong><br/>
         <span style="color:#666;font-size:13px;">${item.subject.replace("\n", "<br/>")}</span>
       </td>
-      <td style="padding:8px;border-bottom:1px solid #eee;text-align:center;">${item.is_hardware ? item.qty : item.qty + "h"}</td>
+      <td style="padding:8px;border-bottom:1px solid #eee;text-align:center;">${
+        item.type === "ADJUSTMENT" ? "" : item.is_hardware ? item.qty : item.qty + "h"
+      }</td>
       <td style="padding:8px;border-bottom:1px solid #eee;text-align:right;">$${item.amount.toFixed(2)}</td>
     </tr>
   `,
