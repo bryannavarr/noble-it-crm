@@ -18,12 +18,20 @@ const bucket = process.env.AWS_S3_BUCKET;
 const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
 const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
 
-const enabled = !!(region && bucket && accessKeyId && secretAccessKey);
+// S3 is enabled when we know which region + bucket to talk to. Credentials are
+// resolved by the SDK itself: it walks env vars → ~/.aws/credentials → the
+// EC2 instance role (IMDS), in that order. Passing explicit creds only when
+// they're present lets the same code work locally with keys, on EC2 with an
+// instance role attached, or in dev with no AWS at all (then `enabled` is
+// false and every op no-ops).
+const enabled = !!(region && bucket);
 
 const client: S3Client | null = enabled
   ? new S3Client({
       region,
-      credentials: { accessKeyId: accessKeyId!, secretAccessKey: secretAccessKey! },
+      ...(accessKeyId && secretAccessKey
+        ? { credentials: { accessKeyId, secretAccessKey } }
+        : {}),
     })
   : null;
 
