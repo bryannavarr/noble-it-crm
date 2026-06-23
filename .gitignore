@@ -1,5 +1,4 @@
 .env
-invoices/
 node_modules/
 dist/
 *.log
