@@ -222,6 +222,81 @@ export const getInvoiceById = async (id: number) => {
   return { ...rows[0], line_items: lineItems };
 };
 
+// Deletes an invoice and unwinds its side effects so the underlying work can
+// be re-billed cleanly:
+//   * invoice_line_items rows go away
+//   * adjustments go back to pending (invoice_id NULL) so they attach to the
+//     next generate
+//   * meetings get unmarked (invoice_id NULL) so they're billable again
+//   * the per-client ticket-prefix counter rolls back IF this was the most
+//     recent invoice for that client (otherwise a gap is left, since rolling
+//     back would conflict with later invoice numbers)
+//   * local PDF file is deleted, S3 object is removed if was archived
+// Tickets are *not* reverted from DONE — work_logs aren't tied to invoices,
+// so the next generate will pick them up regardless; the user can adjust
+// ticket status manually if they want it back to IN_PROGRESS.
+export const deleteInvoice = async (id: number) => {
+  const invoice: any = await getInvoiceById(id);
+  if (!invoice) throw new Error("Invoice not found");
+
+  const localPdfPath = invoice.is_in_cloud ? null : invoice.pdf_path;
+  const s3Key = invoice.is_in_cloud ? invoice.pdf_path : null;
+
+  // Parse the numeric suffix from "PREFIX-N" so we can compare with the
+  // client's last_invoice_number counter.
+  const suffix = Number(String(invoice.invoice_number).split("-").pop());
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    await conn.execute(`UPDATE adjustments SET invoice_id = NULL WHERE invoice_id = ?`, [id]);
+    await conn.execute(`UPDATE meetings    SET invoice_id = NULL WHERE invoice_id = ?`, [id]);
+    await conn.execute(`DELETE FROM invoice_line_items WHERE invoice_id = ?`, [id]);
+
+    // Roll back the per-client counter only if this is still the latest.
+    if (Number.isFinite(suffix)) {
+      await conn.execute(
+        `UPDATE clients
+         SET last_invoice_number = last_invoice_number - 1
+         WHERE id = ? AND last_invoice_number = ?`,
+        [invoice.client_id, suffix],
+      );
+    }
+
+    await conn.execute(`DELETE FROM invoices WHERE id = ?`, [id]);
+
+    await conn.commit();
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
+
+  // Best-effort file cleanup; we don't want a missing file to fail the delete.
+  if (localPdfPath) {
+    try {
+      if (fs.existsSync(localPdfPath)) fs.unlinkSync(localPdfPath);
+    } catch (err: any) {
+      console.warn(`[deleteInvoice] could not remove local file ${localPdfPath}: ${err.message}`);
+    }
+  }
+  if (s3Key && s3.isEnabled()) {
+    try {
+      await s3.deleteObject(s3Key);
+    } catch (err: any) {
+      console.warn(`[deleteInvoice] could not remove S3 object ${s3Key}: ${err.message}`);
+    }
+  }
+
+  return {
+    id,
+    invoice_number: invoice.invoice_number,
+    client_id: invoice.client_id,
+  };
+};
+
 // Appends an ADJUSTMENT line item (positive surcharge or negative discount)
 // to an existing invoice, recomputes total_amount from all line items, and
 // regenerates the PDF. If the invoice already lives in S3, re-uploads it.

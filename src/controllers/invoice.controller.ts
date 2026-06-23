@@ -68,6 +68,16 @@ export const saveInvoiceToS3 = async (req: Request, res: Response): Promise<void
   }
 };
 
+export const deleteInvoice = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const result = await invoiceService.deleteInvoice(Number(req.params.id));
+    res.json({ success: true, data: result, message: 'Invoice deleted' });
+  } catch (err: any) {
+    console.error('[deleteInvoice]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
 export const addAdjustment = async (req: Request, res: Response): Promise<void> => {
   try {
     const { amount, label } = req.body;

@@ -9,5 +9,6 @@ router.get('/',              invoiceController.listInvoices);
 router.get('/:id',           invoiceController.getInvoice);
 router.post('/:id/save',     invoiceController.saveInvoiceToS3);
 router.post('/:id/adjust',   invoiceController.addAdjustment);
+router.delete('/:id',        invoiceController.deleteInvoice);
 
 export default router;
