@@ -1,3 +1,13 @@
+// Node 16 doesn't expose the Web Crypto API on globalThis; the AWS SDK v3
+// needs `globalThis.crypto.getRandomValues` to sign requests. Polyfill from
+// node:crypto.webcrypto (same impl Node 19+ uses globally). MUST run before
+// any import that pulls in @aws-sdk/* — hence the require() form so it can't
+// be hoisted past the imports below.
+if (typeof (globalThis as any).crypto === "undefined") {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  (globalThis as any).crypto = require("crypto").webcrypto;
+}
+
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
