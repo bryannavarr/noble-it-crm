@@ -5,10 +5,11 @@ import helmet from 'helmet';
 import authenticate from './middleware/auth';
 import { saveInvoiceToS3 } from './services/invoice.service';
 
-import ticketRoutes  from './routes/ticket.routes';
-import clientRoutes  from './routes/client.routes';
-import invoiceRoutes from './routes/invoice.routes';
-import meetingRoutes from './routes/meeting.routes';
+import ticketRoutes     from './routes/ticket.routes';
+import clientRoutes     from './routes/client.routes';
+import invoiceRoutes    from './routes/invoice.routes';
+import meetingRoutes    from './routes/meeting.routes';
+import adjustmentRoutes from './routes/adjustment.routes';
 
 const app  = express();
 const port = Number(process.env.PORT ?? 3100);
@@ -45,10 +46,11 @@ app.get('/api/invoices/:id/save', async (req, res) => {
 });
 
 // ── Authenticated API routes ──────────────────────────────────────────────────
-app.use('/api/tickets',  authenticate, ticketRoutes);
-app.use('/api/clients',  authenticate, clientRoutes);
-app.use('/api/invoices', authenticate, invoiceRoutes);
-app.use('/api/meetings', authenticate, meetingRoutes);
+app.use('/api/tickets',     authenticate, ticketRoutes);
+app.use('/api/clients',     authenticate, clientRoutes);
+app.use('/api/invoices',    authenticate, invoiceRoutes);
+app.use('/api/meetings',    authenticate, meetingRoutes);
+app.use('/api/adjustments', authenticate, adjustmentRoutes);
 
 // ── 404 ───────────────────────────────────────────────────────────────────────
 app.use((_req, res) => {

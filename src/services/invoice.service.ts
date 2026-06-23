@@ -12,6 +12,22 @@ import {
 } from "./client.service";
 import { getMeetingsForInvoice } from "./meeting.service";
 import * as s3 from "./s3.service";
+import * as adjustmentService from "./adjustment.service";
+
+// Materializes a pending Adjustment row into the line-item shape buildLineItems
+// produces — used so previewInvoice and the PDF generator treat adjustments
+// uniformly with TICKET/MEETING rows.
+const adjustmentToLineItem = (adj: { id: number; amount: number; label: string }) => ({
+  type: "ADJUSTMENT" as const,
+  reference_id: adj.id,
+  category: "Adjustment",
+  subject: adj.label,
+  qty: 1,
+  unit_price: null,
+  rate: Number(adj.amount),
+  amount: Number(adj.amount),
+  is_hardware: false,
+});
 
 // ── Preview ───────────────────────────────────────────────────────────────────
 
@@ -19,14 +35,21 @@ export const previewInvoice = async (clientId: number, month: string) => {
   const client: any = await getClientById(clientId);
   if (!client) throw new Error("Client not found");
 
-  const lineItems = await buildLineItems(clientId, month);
-  const totalHours = lineItems.reduce((sum, item) => sum + Number(item.qty), 0);
+  const workItems = await buildLineItems(clientId, month);
+  const pendingAdjustments = await adjustmentService.listPendingForClient(clientId);
+  const adjustmentItems = pendingAdjustments.map(adjustmentToLineItem);
+
+  const lineItems = [...workItems, ...adjustmentItems];
+
+  // Hours come only from work items — adjustments are dollar-value rows.
+  const totalHours = workItems.reduce((sum, item) => sum + Number(item.qty), 0);
   const totalAmount = lineItems.reduce((sum, item) => sum + Number(item.amount), 0);
 
   return {
     client,
     month,
     line_items: lineItems,
+    pending_adjustments: pendingAdjustments,
     total_hours: totalHours,
     total_amount: totalAmount,
     invoice_number_preview: await peekNextInvoiceNumber(clientId),
@@ -39,37 +62,57 @@ export const generateInvoice = async (clientId: number, month: string) => {
   const client: any = await getClientById(clientId);
   if (!client) throw new Error("Client not found");
 
-  const lineItems = await buildLineItems(clientId, month);
-  if (!lineItems.length) throw new Error("No billable items found for this period");
+  const workItems = await buildLineItems(clientId, month);
 
-  const totalHours = lineItems.reduce((sum, item) => sum + Number(item.qty), 0);
-  const totalAmount = lineItems.reduce((sum, item) => sum + Number(item.amount), 0);
+  // We allow generation if there are pending adjustments even with no work items
+  // (a manual-credit-only invoice), but disallow if everything is empty.
+  const pendingForCheck = await adjustmentService.listPendingForClient(clientId);
+  if (!workItems.length && !pendingForCheck.length) {
+    throw new Error("No billable items found for this period");
+  }
+
+  const totalHours = workItems.reduce((sum, item) => sum + Number(item.qty), 0);
+  const workTotal = workItems.reduce((sum, item) => sum + Number(item.amount), 0);
 
   const invoiceNumber = await getNextInvoiceNumber(clientId);
   const invoiceDate = new Date();
   const dueDate = new Date();
   dueDate.setDate(dueDate.getDate() + Number(process.env.PAYMENT_DUE_DAYS ?? 30));
 
-  const [result]: any = await pool.execute(
-    `INSERT INTO invoices
-      (client_id, invoice_number, invoice_date, due_date, total_hours, total_amount, status)
-     VALUES (?, ?, ?, ?, ?, ?, 'DRAFT')`,
-    [
-      clientId,
-      invoiceNumber,
-      invoiceDate.toISOString().split("T")[0],
-      dueDate.toISOString().split("T")[0],
-      totalHours,
-      totalAmount,
-    ],
-  );
+  // Use a transaction so the invoice row + line items + adjustment attach
+  // either all land or all roll back.
+  const conn = await pool.getConnection();
+  let invoiceId: number;
+  let lineItems: any[];
+  let totalAmount: number;
+  try {
+    await conn.beginTransaction();
 
-  const invoiceId = result.insertId;
+    const [result]: any = await conn.execute(
+      `INSERT INTO invoices
+        (client_id, invoice_number, invoice_date, due_date, total_hours, total_amount, status)
+       VALUES (?, ?, ?, ?, ?, ?, 'DRAFT')`,
+      [
+        clientId,
+        invoiceNumber,
+        invoiceDate.toISOString().split("T")[0],
+        dueDate.toISOString().split("T")[0],
+        totalHours,
+        workTotal, // placeholder; we update after we know the adjustment total
+      ],
+    );
+    invoiceId = result.insertId;
 
-  // Insert line items
-  await Promise.all(
-    lineItems.map((item) =>
-      pool.execute(
+    // Attach any pending adjustments to this invoice and materialize them as
+    // line items in the same transaction.
+    const attached = await adjustmentService.attachPendingToInvoice(clientId, invoiceId, conn);
+    const adjustmentItems = attached.map(adjustmentToLineItem);
+
+    lineItems = [...workItems, ...adjustmentItems];
+    totalAmount = lineItems.reduce((sum, item) => sum + Number(item.amount), 0);
+
+    for (const item of lineItems) {
+      await conn.execute(
         `INSERT INTO invoice_line_items
           (invoice_id, type, reference_id, category, subject, hours, rate, amount)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -83,9 +126,22 @@ export const generateInvoice = async (clientId: number, month: string) => {
           item.rate ?? 0,
           item.amount,
         ],
-      ),
-    ),
-  );
+      );
+    }
+
+    // Refresh total_amount with the adjustment-inclusive value.
+    await conn.execute(`UPDATE invoices SET total_amount = ? WHERE id = ?`, [
+      totalAmount,
+      invoiceId,
+    ]);
+
+    await conn.commit();
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
 
   // Mark meetings as invoiced
   const meetingIds = lineItems
@@ -169,22 +225,25 @@ export const getInvoiceById = async (id: number) => {
 // Appends an ADJUSTMENT line item (positive surcharge or negative discount)
 // to an existing invoice, recomputes total_amount from all line items, and
 // regenerates the PDF. If the invoice already lives in S3, re-uploads it.
+// The adjustment is also recorded in the `adjustments` table (with invoice_id
+// set immediately) so it shares the same audit trail as pending adjustments.
 export const addAdjustment = async (invoiceId: number, amount: number, label: string) => {
   const invoice: any = await getInvoiceById(invoiceId);
   if (!invoice) throw new Error("Invoice not found");
-  if (!Number.isFinite(amount) || amount === 0) {
-    throw new Error("Adjustment amount must be a non-zero number");
-  }
-  const trimmedLabel = String(label || "").trim();
-  if (!trimmedLabel) throw new Error("Adjustment label is required");
 
-  const signedAmount = Number(amount.toFixed(2));
+  // Record in adjustments table first — also validates amount + label.
+  const adj = await adjustmentService.addAttached(
+    invoice.client_id,
+    invoiceId,
+    amount,
+    label,
+  );
 
   await pool.execute(
     `INSERT INTO invoice_line_items
        (invoice_id, type, reference_id, category, subject, hours, rate, amount)
-     VALUES (?, 'ADJUSTMENT', 0, 'Adjustment', ?, 1, ?, ?)`,
-    [invoiceId, trimmedLabel, signedAmount, signedAmount],
+     VALUES (?, 'ADJUSTMENT', ?, 'Adjustment', ?, 1, ?, ?)`,
+    [invoiceId, adj.id, adj.label, adj.amount, adj.amount],
   );
 
   const [[totals]]: any = await pool.execute(
