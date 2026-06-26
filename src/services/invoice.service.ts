@@ -412,6 +412,9 @@ export const saveInvoiceToS3 = async (id: number) => {
 const buildLineItems = async (clientId: number, month: string) => {
   const items: any[] = [];
 
+  // Exclude tickets that already have a line item on any prior invoice — once
+  // a ticket has been billed, it shouldn't reappear on subsequent previews
+  // just because it still has work_logs in the queried month.
   const [tickets]: any = await pool.execute(
     `SELECT t.id, t.ticket_number, t.category, t.subject, t.description,
             SUM(wl.qty) AS total_qty
@@ -419,6 +422,10 @@ const buildLineItems = async (clientId: number, month: string) => {
      JOIN work_logs wl ON wl.ticket_id = t.id
      WHERE t.client_id = ?
      AND DATE_FORMAT(wl.worked_date, '%Y-%m') = ?
+     AND NOT EXISTS (
+       SELECT 1 FROM invoice_line_items ili
+       WHERE ili.reference_id = t.id AND ili.type = 'TICKET'
+     )
      GROUP BY t.id
      HAVING total_qty > 0
      ORDER BY CAST(SUBSTRING_INDEX(t.ticket_number, '-', -1) AS UNSIGNED) ASC`,

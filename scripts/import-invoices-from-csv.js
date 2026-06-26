@@ -18,6 +18,13 @@
 // Required per row: filepath, client_prefix, invoice_number, invoice_date,
 // total_amount. Anything else is filled with sensible defaults.
 
+// Node 16 doesn't expose Web Crypto on globalThis; AWS SDK v3 needs
+// globalThis.crypto.getRandomValues to sign S3 requests. Polyfill from
+// node:crypto.webcrypto. Safe no-op on Node 19+.
+if (typeof globalThis.crypto === "undefined") {
+  globalThis.crypto = require("crypto").webcrypto;
+}
+
 require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
