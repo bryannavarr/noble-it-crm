@@ -116,8 +116,8 @@ export interface UpdateTicketPayload {
 
 export interface LogTimePayload {
   qty: number;
-  unit_price?: number; // set for HARDWARE, omit for services
-  markup_pct?: number; // captured per HARDWARE log; NULL = env fallback
+  unit_price?: number;      // HARDWARE: our cost. MEDIA: per-unit sell. Omit for services.
+  unit_sell_price?: number; // HARDWARE only: per-unit sell price (replaces markup_pct).
   description?: string;
   worked_date: string;
 }

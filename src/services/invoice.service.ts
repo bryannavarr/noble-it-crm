@@ -442,12 +442,12 @@ const buildLineItems = async (clientId: number, month: string) => {
       : `${ticket.ticket_number}: ${ticket.subject}`;
 
     if (ticket.category === "HARDWARE") {
-      // Hardware: sum qty × unit_price × (1 + markup_pct/100) per work log.
-      // Each row carries its own markup (captured at log time). NULL means
-      // "use env default" — the legacy behavior for rows logged before this
-      // feature shipped.
+      // Hardware: customer pays qty × unit_sell_price per row. unit_sell_price
+      // is captured at log time. NULL means "legacy row logged before this
+      // feature shipped" — fall back to cost × env markup so old invoices
+      // still bill correctly.
       const [logs]: any = await pool.execute(
-        `SELECT qty, unit_price, markup_pct FROM work_logs
+        `SELECT qty, unit_price, unit_sell_price FROM work_logs
          WHERE ticket_id = ?
          AND DATE_FORMAT(worked_date, '%Y-%m') = ?`,
         [ticket.id, month],
@@ -455,9 +455,11 @@ const buildLineItems = async (clientId: number, month: string) => {
 
       const totalQty = logs.reduce((sum: number, l: any) => sum + Number(l.qty), 0);
       const totalAmount = logs.reduce((sum: number, l: any) => {
-        const rowMarkup =
-          l.markup_pct == null ? hardwareMarkup : 1 + Number(l.markup_pct) / 100;
-        return sum + Number(l.qty) * Number(l.unit_price) * rowMarkup;
+        const sellPerUnit =
+          l.unit_sell_price != null
+            ? Number(l.unit_sell_price)
+            : Number(l.unit_price) * hardwareMarkup;
+        return sum + Number(l.qty) * sellPerUnit;
       }, 0);
 
       items.push({
