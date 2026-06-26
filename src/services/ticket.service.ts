@@ -186,7 +186,7 @@ export const deleteTicket = async (id: number) => {
 // ── Work logs ─────────────────────────────────────────────────────────────────
 
 export const logTime = async (ticketId: number, payload: LogTimePayload) => {
-  const { qty, unit_price, description, worked_date } = payload;
+  const { qty, unit_price, markup_pct, description, worked_date } = payload;
 
   const ticket: any = await getTicketById(ticketId);
   if (!ticket) throw new Error("Ticket not found");
@@ -196,10 +196,14 @@ export const logTime = async (ticketId: number, payload: LogTimePayload) => {
     throw new Error("unit_price is required for HARDWARE tickets");
   }
 
+  // markup_pct only meaningful for HARDWARE; ignored otherwise. Pre-coerce to
+  // null so non-HARDWARE rows don't carry a stale value if the client sent one.
+  const markup = ticket.category === "HARDWARE" ? (markup_pct ?? null) : null;
+
   const [result]: any = await pool.execute(
-    `INSERT INTO work_logs (ticket_id, client_id, qty, unit_price, description, worked_date)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [ticketId, ticket.client_id, qty, unit_price ?? null, description ?? null, worked_date],
+    `INSERT INTO work_logs (ticket_id, client_id, qty, unit_price, markup_pct, description, worked_date)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [ticketId, ticket.client_id, qty, unit_price ?? null, markup, description ?? null, worked_date],
   );
 
   const [rows]: any = await pool.execute("SELECT * FROM work_logs WHERE id = ?", [result.insertId]);
