@@ -1,0 +1,2 @@
+filepath,filename,client_prefix,invoice_number,invoice_date,due_date,total_amount,total_hours,status,notes
+invoices/GSR-1.pdf,GSR-1.pdf,GSR,GSR-1,2026-03-17,2026-04-16,129,2.58,PAID,
